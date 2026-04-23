@@ -1,7 +1,4 @@
 
-
-const sharpness : f32 = 0.15;
-
 struct CameraUniform {
     view_proj: mat4x4<f32>,
 }
@@ -10,6 +7,7 @@ struct Resolution{
    inputheight:f32,
    outputwidth:f32,
    outputheight:f32,
+   sharpness: f32,
 }
 
 
@@ -131,7 +129,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32>{
 	var lobeR:f32  = max(-hitMinR, hitMaxR);
 	var lobeG:f32  = max(-hitMinG, hitMaxG);
 	var lobeB :f32  = max(-hitMinB, hitMaxB);
-	var lobe :f32  = max(-FSR_RCAS_LIMIT, min(max3f(lobeR, lobeG, lobeB), 0.0)) * sharpness;
+	var lobe :f32  = max(-FSR_RCAS_LIMIT, min(max3f(lobeR, lobeG, lobeB), 0.0)) * resolution.sharpness;
 
 	// Apply noise removal.
 	lobe = lobe * nz;
