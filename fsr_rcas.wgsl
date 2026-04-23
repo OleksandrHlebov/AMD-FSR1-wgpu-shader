@@ -1,6 +1,6 @@
 
 
-let sharpness : f32 = 0.15;
+const sharpness : f32 = 0.15;
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
