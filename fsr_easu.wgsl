@@ -15,36 +15,12 @@ struct Resolution{
    outputheight:f32,
 }
 
-
-//!CONSTANT
-//!VALUE INPUT_WIDTH
-//let inputWidth : f32 = 1600.0;
-
-//!CONSTANT
-//!VALUE INPUT_HEIGHT
-//let inputHeight : f32 = 900.0;
-
-// //!CONSTANT
-// //!VALUE INPUT_WIDTH
-// let inputWidth : f32 = 1280.0;
-
-// //!CONSTANT
-// //!VALUE INPUT_HEIGHT
-// let inputHeight : f32 = 720.0;
-
-//!CONSTANT
-//!VALUE OUTPUT_WIDTH
-//let outputWidth : f32 = 1920.0;
-
-//!CONSTANT
-//!VALUE OUTPUT_HEIGHT
-//let outputHeight : f32 = 1080.0;
 @group(0) @binding(0)
 var input: texture_2d<f32>;
 @group(0) @binding(1)
 var sam: sampler;
 
-@group(1) @binding(0)// 1.
+@group(1) @binding(0)
 var<uniform> resolution:Resolution;
 
 @vertex

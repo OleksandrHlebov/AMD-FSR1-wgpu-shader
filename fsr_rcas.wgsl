@@ -73,12 +73,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32>{
 	// let e : vec3<f32>  = textureLoad(input,vec2<i32>(sp), 0).rgb;
 	// var f : vec3<f32>  = textureLoad(input,vec2<i32>(sp.x + 1, sp.y), 0).rgb;
 	// var h : vec3<f32>  = textureLoad(input,vec2<i32>(sp.x, sp.y + 1), 0).rgb;
-
-	let b : vec3<f32> = textureSample(input,sam,in.tex_coords + vec2<f32>(0.0, -1. / resolution.outputheight)).rgb;
-	let d : vec3<f32> = textureSample(input,sam,in.tex_coords + vec2<f32>(-1. / resolution.outputwidth, 0.0)).rgb;
-	var e : vec3<f32> = textureSample(input,sam,in.tex_coords).rgb;
-	let f : vec3<f32> = textureSample(input,sam,in.tex_coords + vec2<f32>(1. / resolution.outputwidth, 0.0)).rgb;
-	let h : vec3<f32> = textureSample(input,sam,in.tex_coords + vec2<f32>(0.0, 1. / resolution.outputheight)).rgb;
+    let sp = vec2<i32>(in.clip_position.xy);
+	let b : vec3<f32> = textureLoad(input, sp + vec2<i32>(0, -1), 0).rgb;
+	let d : vec3<f32> = textureLoad(input, sp + vec2<i32>(-1, 0), 0).rgb;
+	var e : vec3<f32> = textureLoad(input, sp, 0).rgb;
+	let f : vec3<f32> = textureLoad(input, sp + vec2<i32>(1, 0), 0).rgb;
+	let h : vec3<f32> = textureLoad(input, sp + vec2<i32>(0, 1), 0).rgb;
 	// Rename (32-bit) or regroup (16-bit).
 	var bR :f32 = b.r;
 	var bG :f32  = b.g;
@@ -132,7 +132,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32>{
 	var lobe :f32  = max(-FSR_RCAS_LIMIT, min(max3f(lobeR, lobeG, lobeB), 0.0)) * resolution.sharpness;
 
 	// Apply noise removal.
-	lobe = lobe * nz;
+//	lobe = lobe * nz;
 
 	// Resolve, which needs the medium precision rcp approximation to avoid visible tonality changes.
 	var rcpL :f32  = 1.0/(4.0 * lobe + 1.0);
