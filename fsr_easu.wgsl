@@ -34,129 +34,88 @@ fn vs_main(
     return out;
 }
 
-fn min3(a:vec3<f16>,b:vec3<f16>,c:vec3<f16>)->vec3<f16>{
-    return min(a, min(b,c));
-}
-fn max3(a:vec3<f16>,b:vec3<f16>,c:vec3<f16>)->vec3<f16>{
-    return max(a, max(b,c));
-}
-
-struct FsrTap{
-    aC:vec3<f16>,
-    aW:f16,
-}
+// Packed (FSR_EASU_H) data: every vec2<f16> holds TWO lanes of work, so the
+// math below is the genuine 16-bit dual-issue path, not the scalar FSR_EASU_F
+// reference retyped to f16.
 struct FsrSet{
-    dir:vec2<f16>,
-    len:f16,
+    dirPX:vec2<f16>, // dir.x for the two packed quadrants.
+    dirPY:vec2<f16>, // dir.y for the two packed quadrants.
+    lenP:vec2<f16>,  // len for the two packed quadrants.
 }
-fn saturate(num:f16)->f16{
-	  return clamp(num, f16(0.0), f16(1.0));
-}
-fn matchSet(pp:vec2<f16>,biS:bool, biT:bool, biU:bool, biV:bool) -> f16{
-	if(biS){
-		return (1.0 - pp.x) * (1.0 - pp.y);
-	}
-	else if(biT){
-        return pp.x * (1.0 - pp.y);
-	}
-	else if(biU){
-       return (1.0 - pp.x) * pp.y;
-	}
-	else if(biV){
-       return pp.x * pp.y;
-	}
-	else{
-	   return f16(0.0);
-	}
+struct FsrTap{
+    aCR:vec2<f16>, // Accumulated red for the two packed taps.
+    aCG:vec2<f16>,
+    aCB:vec2<f16>,
+    aW:vec2<f16>,  // Accumulated weight for the two packed taps.
 }
 
-// Filtering for a given tap for the scalar.
-fn FsrEasuTap(
-	fsr:FsrTap, // Accumulated color, with negative lobe. // Accumulated weight.
-	off:vec2<f16>, // Pixel offset from resolve position to tap.
-	dir:vec2<f16>, // Gradient direction.
-	len:vec2<f16>, // Length.
-	lob:f16, // Negative lobe strength.
-	clp:f16, // Clipping point.
-	c:vec3<f16>  // Tap color.
-)-> FsrTap {
-	// Rotate offset by direction.
-	var fsr1 : FsrTap = fsr;
-    var aC : vec3<f16> = fsr1.aC;
-    var aW : f16 = fsr1.aW;
-	var v : vec2<f16> = vec2<f16>(0.0);
-	v.x = (off.x * (dir.x)) + (off.y * dir.y);
-	v.y = (off.x * (-dir.y)) + (off.y * dir.x);
-	// Anisotropy.
-	v = v * len;
-	// Compute distance^2.
-	var d2 : f16 = v.x * v.x + v.y * v.y;
-	// Limit to the window as at corner, 2 taps can easily be outside.
-	d2 = min(d2, clp);
-	// Approximation of lanczos2 without sin() or rcp(), or sqrt() to get x.
-	//  (25/16 * (2/5 * x^2 - 1)^2 - (25/16 - 1)) * (1/4 * x^2 - 1)^2
-	//  |_______________________________________|   |_______________|
-	//                   base                             window
-	// The general form of the 'base' is,
-	//  (a*(b*x^2-1)^2-(a-1))
-	// Where 'a=1/(2*b-b^2)' and 'b' moves around the negative lobe.
-	var wB : f16 = 2.0 / 5.0 * d2 - 1.0;
-	var wA : f16 = lob * d2 - 1.0;
-	wB = wB * wB;
-	wA = wA * wA;
-	wB = 25.0 / 16.0 * wB - (25.0 / 16.0 - 1.0);
-	var w : f16 = wB * wA;
-	// Do weighted average.
-	aC = aC + c * w;
-    aW = aW + w;
-    fsr1.aC = aC;
-    fsr1.aW = aW;
+// Accumulate direction and length — runs 2 quadrants in parallel.
+fn FsrEasuSetH(
+    fsr:FsrSet,
+    pp:vec2<f16>,
+    biST:bool, biUV:bool,
+    lA:vec2<f16>, lB:vec2<f16>, lC:vec2<f16>, lD:vec2<f16>, lE:vec2<f16>) -> FsrSet {
+    var fsr1 : FsrSet = fsr;
+    // Bilinear weight for the two packed quadrants: {wS,wT} or {wU,wV}.
+    var w : vec2<f16> = vec2<f16>(0.0);
+    if (biST) { w = (vec2<f16>(1.0, 0.0) + vec2<f16>(-pp.x, pp.x)) * (f16(1.0) - pp.y); }
+    if (biUV) { w = (vec2<f16>(1.0, 0.0) + vec2<f16>(-pp.x, pp.x)) * pp.y; }
+    // Direction is the '+' diff; length converts gradient reversal to 0.
+    var dc : vec2<f16> = lD - lC;
+    var cb : vec2<f16> = lC - lB;
+    var lenX : vec2<f16> = max(abs(dc), abs(cb));
+    lenX = vec2<f16>(1.0) / lenX;
+    var dirX : vec2<f16> = lD - lB;
+    fsr1.dirPX = fsr1.dirPX + dirX * w;
+    lenX = clamp(abs(dirX) * lenX, vec2<f16>(0.0), vec2<f16>(1.0));
+    lenX = lenX * lenX;
+    fsr1.lenP = fsr1.lenP + lenX * w;
+    // Repeat for the y axis.
+    var ec : vec2<f16> = lE - lC;
+    var ca : vec2<f16> = lC - lA;
+    var lenY : vec2<f16> = max(abs(ec), abs(ca));
+    lenY = vec2<f16>(1.0) / lenY;
+    var dirY : vec2<f16> = lE - lA;
+    fsr1.dirPY = fsr1.dirPY + dirY * w;
+    lenY = clamp(abs(dirY) * lenY, vec2<f16>(0.0), vec2<f16>(1.0));
+    lenY = lenY * lenY;
+    fsr1.lenP = fsr1.lenP + lenY * w;
     return fsr1;
 }
 
-
-
-// Accumulate direction and length.
-fn FsrEasuSet(
-	fsr : FsrSet,
-	pp:vec2<f16>,
-	biS:bool, biT:bool, biU:bool, biV:bool,
-	lA:f16, lB:f16, lC:f16, lD:f16, lE:f16) -> FsrSet{
-	// Compute bilinear weight, branches factor out as predicates are compiler time immediates.
-	//  s t
-	//  u v
-	var fsr1 : FsrSet = fsr;
-    var dir : vec2<f16> = fsr1.dir;
-    var len : f16 = fsr1.len;
-	var w : f16 = f16(0.0);
-	w = matchSet(pp,biS,biT,biU,biV);
-	// Direction is the '+' diff.
-	//    a
-	//  b c d
-	//    e
-	// Then takes magnitude from abs average of both sides of 'c'.
-	// Length converts gradient reversal to 0, smoothly to non-reversal at 1, shaped, then adding horz and vert terms.
-	var dc:f16 = lD - lC;
-	var cb:f16 = lC - lB;
-	var lenX:f16 = max(abs(dc), abs(cb));
-	lenX = 1.0 / lenX;
-	var dirX :f16 = lD - lB;
-	dir.x = dir.x + (dirX * w);
-	lenX = saturate(abs(dirX) * lenX);
-	lenX = lenX * lenX;
-	len = len + (lenX * w);
-	// Repeat for the y axis.
-	var ec :f16 = lE - lC;
-	var ca : f16 = lC - lA;
-	var lenY :f16 = max(abs(ec), abs(ca));
-	lenY = 1.0 / lenY;
-	var dirY:f16 = lE - lA;
-	dir.y = dir.y + (dirY * w);
-	lenY = saturate(abs(dirY) * lenY);
-	lenY = lenY * lenY;
-	len = len + (lenY * w);
-    fsr1.dir = dir;
-    fsr1.len = len;
+// Filtering for a given tap — runs 2 taps in parallel.
+fn FsrEasuTapH(
+    fsr:FsrTap,
+    offX:vec2<f16>, // Pixel x offset of the two taps.
+    offY:vec2<f16>, // Pixel y offset of the two taps.
+    dir:vec2<f16>,  // Gradient direction.
+    len:vec2<f16>,  // Anisotropic length.
+    lob:f16,        // Negative lobe strength.
+    clp:f16,        // Clipping point.
+    cR:vec2<f16>, cG:vec2<f16>, cB:vec2<f16> // Tap colors for the two taps.
+)-> FsrTap {
+    var fsr1 : FsrTap = fsr;
+    // Rotate offset by direction.
+    var vX : vec2<f16> = offX * dir.xx + offY * dir.yy;
+    var vY : vec2<f16> = offX * (-dir.yy) + offY * dir.xx;
+    // Anisotropy.
+    vX = vX * len.x;
+    vY = vY * len.y;
+    // Compute distance^2, limited to the window.
+    var d2 : vec2<f16> = vX * vX + vY * vY;
+    d2 = min(d2, vec2<f16>(clp));
+    // Approximation of lanczos2 (see FSR_EASU_F reference for the derivation).
+    var wB : vec2<f16> = vec2<f16>(2.0 / 5.0) * d2 + vec2<f16>(-1.0);
+    var wA : vec2<f16> = vec2<f16>(lob) * d2 + vec2<f16>(-1.0);
+    wB = wB * wB;
+    wA = wA * wA;
+    wB = vec2<f16>(25.0 / 16.0) * wB + vec2<f16>(-(25.0 / 16.0 - 1.0));
+    var w : vec2<f16> = wB * wA;
+    // Do weighted average.
+    fsr1.aCR = fsr1.aCR + cR * w;
+    fsr1.aCG = fsr1.aCG + cG * w;
+    fsr1.aCB = fsr1.aCB + cB * w;
+    fsr1.aW = fsr1.aW + w;
     return fsr1;
 }
 
@@ -248,67 +207,78 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32>{
 	var gL :f16 = klhgL.w;
 	var oL :f16 = zzonL.z;
 	var nL :f16 = zzonL.w;
-	// Accumulate for bilinear interpolation.
+	// Accumulate for bilinear interpolation — 4 quadrants as 2 packed pairs.
     var fsr:FsrSet;
-	fsr.dir = vec2<f16>(0.0,0.0);
-	fsr.len = f16(0.0);
-	fsr = FsrEasuSet(fsr, pph, true, false, false, false, bL, eL, fL, gL, jL);
-	fsr = FsrEasuSet(fsr, pph, false, true, false, false, cL, fL, gL, hL, kL);
-	fsr = FsrEasuSet(fsr, pph, false, false, true, false, fL, iL, jL, kL, nL);
-    fsr = FsrEasuSet(fsr, pph, false, false, false, true, gL, jL, kL, lL, oL);
+	fsr.dirPX = vec2<f16>(0.0, 0.0);
+	fsr.dirPY = vec2<f16>(0.0, 0.0);
+	fsr.lenP = vec2<f16>(0.0, 0.0);
+	fsr = FsrEasuSetH(fsr, pph, true, false,
+		vec2<f16>(bL, cL), vec2<f16>(eL, fL), vec2<f16>(fL, gL), vec2<f16>(gL, hL), vec2<f16>(jL, kL));
+	fsr = FsrEasuSetH(fsr, pph, false, true,
+		vec2<f16>(fL, gL), vec2<f16>(iL, jL), vec2<f16>(jL, kL), vec2<f16>(kL, lL), vec2<f16>(nL, oL));
+	// Reduce the packed pairs to scalar dir/len.
+	var dir : vec2<f16> = vec2<f16>(fsr.dirPX.x + fsr.dirPX.y, fsr.dirPY.x + fsr.dirPY.y);
+	var len : f16 = fsr.lenP.x + fsr.lenP.y;
 	//------------------------------------------------------------------------------------------------------------------------------
 	  // Normalize with approximation, and cleanup close to zero.
-	var dir2 :vec2<f16> = fsr.dir * fsr.dir;
+	var dir2 :vec2<f16> = dir * dir;
 	var dirR :f16 = dir2.x + dir2.y;
 	var zro : bool = dirR < f16(1.0 / 32768.0);
-	dirR = 1.0/(sqrt(dirR));
+	dirR = f16(1.0) / sqrt(dirR);
 	if (zro) {dirR = f16(1.0);};
-	if (zro) {fsr.dir.x = f16(1.0);};
-	fsr.dir = fsr.dir * dirR;
+	if (zro) {dir.x = f16(1.0);};
+	dir = dir * dirR;
 	// Transform from {0 to 2} to {0 to 1} range, and shape with square.
-	fsr.len = fsr.len * 0.5;
-	fsr.len = fsr.len * fsr.len;
+	len = len * 0.5;
+	len = len * len;
 	// Stretch kernel {1.0 vert|horz, to sqrt(2.0) on diagonal}.
-	var stretch :f16 = (fsr.dir.x * fsr.dir.x + fsr.dir.y * fsr.dir.y) * 1.0/(max(abs(fsr.dir.x), abs(fsr.dir.y)));
+	var stretch :f16 = (dir.x * dir.x + dir.y * dir.y) * 1.0/(max(abs(dir.x), abs(dir.y)));
 	// Anisotropic length after rotation,
 	//  x := 1.0 lerp to 'stretch' on edges
 	//  y := 1.0 lerp to 2x on edges
-	var len2:vec2<f16> = vec2<f16>(1.0 + (stretch - 1.0) * fsr.len, 1.0 - 0.5 * fsr.len );
+	var len2:vec2<f16> = vec2<f16>(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len );
 	// Based on the amount of 'edge',
 	// the window shifts from +/-{sqrt(2.0) to slightly beyond 2.0}.
-	var lob : f16 = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * fsr.len;
+	var lob : f16 = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
 	// Set distance^2 clipping point to the end of the adjustable window.
 	var clp : f16 = 1.0/lob;
 	//------------------------------------------------------------------------------------------------------------------------------
-	  // Accumulation mixed with min/max of 4 nearest.
+	  // Min/max of the 4 nearest, packed: each vec2 carries {-min, max} for one channel.
 	  //    b c
 	  //  e f g h
 	  //  i j k l
 	  //    n o
-	var min4 = min(min3(vec3<f16>(ijfeR.z, ijfeG.z, ijfeB.z), vec3<f16>(klhgR.w, klhgG.w, klhgB.w), vec3<f16>(ijfeR.y, ijfeG.y, ijfeB.y)),
-		vec3<f16>(klhgR.x, klhgG.x, klhgB.x));
-
-	var max4:vec3<f16> = max(max3(vec3<f16>(ijfeR.z, ijfeG.z, ijfeB.z), vec3<f16>(klhgR.w, klhgG.w, klhgB.w), vec3<f16>(ijfeR.y, ijfeG.y, ijfeB.y)),
-		vec3<f16>(klhgR.x, klhgG.x, klhgB.x));
-	// Accumulation.
+	var bothR : vec2<f16> = max(max(vec2<f16>(-ijfeR.z, ijfeR.z), vec2<f16>(-klhgR.w, klhgR.w)),
+		max(vec2<f16>(-ijfeR.y, ijfeR.y), vec2<f16>(-klhgR.x, klhgR.x)));
+	var bothG : vec2<f16> = max(max(vec2<f16>(-ijfeG.z, ijfeG.z), vec2<f16>(-klhgG.w, klhgG.w)),
+		max(vec2<f16>(-ijfeG.y, ijfeG.y), vec2<f16>(-klhgG.x, klhgG.x)));
+	var bothB : vec2<f16> = max(max(vec2<f16>(-ijfeB.z, ijfeB.z), vec2<f16>(-klhgB.w, klhgB.w)),
+		max(vec2<f16>(-ijfeB.y, ijfeB.y), vec2<f16>(-klhgB.x, klhgB.x)));
+	// Accumulation — 12 taps as 6 packed pairs.
 	var fsr2:FsrTap;
-	fsr2.aC = vec3<f16>(0.0,0.0,0.0);
-	fsr2.aW = f16(0.0);
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(0.0, -1.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(bczzR.x, bczzG.x, bczzB.x)); // b
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(1.0, -1.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(bczzR.y, bczzG.y, bczzB.y)); // c
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(-1.0, 1.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(ijfeR.x, ijfeG.x, ijfeB.x)); // i
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(0.0, 1.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(ijfeR.y, ijfeG.y, ijfeB.y)); // j
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(0.0, 0.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(ijfeR.z, ijfeG.z, ijfeB.z)); // f
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(-1.0, 0.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(ijfeR.w, ijfeG.w, ijfeB.w)); // e
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(1.0, 1.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(klhgR.x, klhgG.x, klhgB.x)); // k
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(2.0, 1.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(klhgR.y, klhgG.y, klhgB.y)); // l
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(2.0, 0.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(klhgR.z, klhgG.z, klhgB.z)); // h
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(1.0, 0.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(klhgR.w, klhgG.w, klhgB.w)); // g
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(1.0, 2.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(zzonR.z, zzonG.z, zzonB.z)); // o
-	fsr2=FsrEasuTap(fsr2, vec2<f16>(0.0, 2.0) - pph, fsr.dir, len2, lob, clp, vec3<f16>(zzonR.w, zzonG.w, zzonB.w)); // n
+	fsr2.aCR = vec2<f16>(0.0, 0.0);
+	fsr2.aCG = vec2<f16>(0.0, 0.0);
+	fsr2.aCB = vec2<f16>(0.0, 0.0);
+	fsr2.aW = vec2<f16>(0.0, 0.0);
+	fsr2 = FsrEasuTapH(fsr2, vec2<f16>(0.0, 1.0) - pph.xx, vec2<f16>(-1.0, -1.0) - pph.yy,
+		dir, len2, lob, clp, bczzR.xy, bczzG.xy, bczzB.xy); // b c
+	fsr2 = FsrEasuTapH(fsr2, vec2<f16>(-1.0, 0.0) - pph.xx, vec2<f16>(1.0, 1.0) - pph.yy,
+		dir, len2, lob, clp, ijfeR.xy, ijfeG.xy, ijfeB.xy); // i j
+	fsr2 = FsrEasuTapH(fsr2, vec2<f16>(0.0, -1.0) - pph.xx, vec2<f16>(0.0, 0.0) - pph.yy,
+		dir, len2, lob, clp, ijfeR.zw, ijfeG.zw, ijfeB.zw); // f e
+	fsr2 = FsrEasuTapH(fsr2, vec2<f16>(1.0, 2.0) - pph.xx, vec2<f16>(1.0, 1.0) - pph.yy,
+		dir, len2, lob, clp, klhgR.xy, klhgG.xy, klhgB.xy); // k l
+	fsr2 = FsrEasuTapH(fsr2, vec2<f16>(2.0, 1.0) - pph.xx, vec2<f16>(0.0, 0.0) - pph.yy,
+		dir, len2, lob, clp, klhgR.zw, klhgG.zw, klhgB.zw); // h g
+	fsr2 = FsrEasuTapH(fsr2, vec2<f16>(1.0, 0.0) - pph.xx, vec2<f16>(2.0, 2.0) - pph.yy,
+		dir, len2, lob, clp, zzonR.zw, zzonG.zw, zzonB.zw); // o n
   //------------------------------------------------------------------------------------------------------------------------------
-	// Normalize and dering.
-	var c : vec3<f16> = min(max4, max(min4, fsr2.aC * (1.0/fsr2.aW)));
+	// Reduce packed pairs, normalize and dering.
+	var aC : vec3<f16> = vec3<f16>(fsr2.aCR.x + fsr2.aCR.y, fsr2.aCG.x + fsr2.aCG.y, fsr2.aCB.x + fsr2.aCB.y);
+	var aW : f16 = fsr2.aW.x + fsr2.aW.y;
+	var min4 : vec3<f16> = -vec3<f16>(bothR.x, bothG.x, bothB.x);
+	var max4 : vec3<f16> = vec3<f16>(bothR.y, bothG.y, bothB.y);
+	var c : vec3<f16> = min(max4, max(min4, aC * (f16(1.0) / aW)));
 
 	return vec4<f32>(vec3<f32>(c), 1.0);
 }
